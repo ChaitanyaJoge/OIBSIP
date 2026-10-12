@@ -213,7 +213,6 @@ const handleAdminLogin = async (event) => {
   }
 };
 
-
   const testBackend = async () => {
     try {
       const response = await axios.get("http://localhost:5001/api/health");
@@ -222,8 +221,6 @@ const handleAdminLogin = async (event) => {
       setMessage("Backend unavailable. Make sure the server is running.");
     }
   };
-
-
 
   const placeOrder = async () => {
     if (cart.length === 0) {
@@ -240,10 +237,16 @@ const handleAdminLogin = async (event) => {
         }
       );
 
+
       setMessage(
         `${response.data.message} Order ID: ${response.data.order.orderId}`
       );
       setCart([]);
+
+      if (adminToken) {
+        await fetchInventory();
+      }
+
     } catch (error) {
       setMessage(
         error.response?.data?.message || "Could not place your order."

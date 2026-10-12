@@ -182,6 +182,7 @@ app.patch("/api/orders/:id/status", verifyAdminToken, async (req, res) => {
   }
 });
 
+
 app.post("/api/orders", async (req, res) => {
   try {
     const { items, total } = req.body;
@@ -204,6 +205,84 @@ app.post("/api/orders", async (req, res) => {
       });
     }
 
+    // Count how many units of each stocked pizza are ordered.
+    const quantities = {};
+
+    for (const item of items) {
+      if (
+        !item ||
+        typeof item.name !== "string" ||
+        !item.name.trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Each order item must have a valid name.",
+        });
+      }
+
+      if (item.name.trim() !== "Custom Pizza") {
+        const name = item.name.trim();
+        quantities[name] = (quantities[name] || 0) + 1;
+      }
+    }
+
+    // Check inventory before accepting the order.
+    const stockUpdates = [];
+
+    for (const [name, quantity] of Object.entries(quantities)) {
+      const inventoryItem = await Inventory.findOne({ name });
+
+      // Untracked pizzas are not deducted from inventory.
+      if (!inventoryItem) {
+        continue;
+      }
+
+      if (inventoryItem.stock < quantity) {
+        return res.status(409).json({
+          success: false,
+          message: `Insufficient stock for ${name}. Available: ${inventoryItem.stock}.`,
+        });
+      }
+
+      stockUpdates.push({
+        name,
+        quantity,
+      });
+    }
+
+    // Deduct stock conditionally to avoid reducing it below zero.
+    const deducted = [];
+
+    for (const update of stockUpdates) {
+      const result = await Inventory.updateOne(
+        {
+          name: update.name,
+          stock: { $gte: update.quantity },
+        },
+        {
+          $inc: { stock: -update.quantity },
+          $set: { updatedAt: new Date() },
+      }
+      );
+
+      if (result.modifiedCount !== 1) {
+        // Restore stock already deducted for this order attempt.
+        for (const previous of deducted) {
+          await Inventory.updateOne(
+            { name: previous.name },
+            { $inc: { stock: previous.quantity } }
+          );
+        }
+
+        return res.status(409).json({
+          success: false,
+          message: `Stock changed while placing your order. Please try again.`,
+        });
+      }
+
+      deducted.push(update);
+    }
+
     const order = new Order({
       orderId: `PZ-${Date.now()}`,
       items,
@@ -211,21 +290,34 @@ app.post("/api/orders", async (req, res) => {
       status: "Order Received",
     });
 
-    await order.save();
+    try {
+      await order.save();
+    } catch (error) {
+      // Restore stock if saving the order fails.
+      for (const previous of deducted) {
+        await Inventory.updateOne(
+          { name: previous.name },
+          { $inc: { stock: previous.quantity } }
+        );
+      }
 
-    res.status(201).json({
+      throw error;
+    }
+
+    return res.status(201).json({
       success: true,
       message: "Order saved successfully!",
       order,
     });
   } catch (error) {
     console.error("Order save error:", error.message);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Could not save your order. Please try again.",
     });
   }
 });
+
 
 // Get inventory and identify low-stock items (admin only)
 app.get("/api/inventory", verifyAdminToken, async (req, res) => {
