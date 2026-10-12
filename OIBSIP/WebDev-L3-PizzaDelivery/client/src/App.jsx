@@ -54,7 +54,14 @@ const fetchOrders = async () => {
   setLoadingOrders(true);
 
   try {
-    const response = await axios.get("http://localhost:5001/api/orders");
+    const response = await axios.get(
+  "http://localhost:5001/api/orders",
+  {
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+    },
+  }
+);
     setOrders(response.data.orders);
     setMessage("");
   } catch (error) {

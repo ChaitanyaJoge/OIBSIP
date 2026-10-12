@@ -115,7 +115,7 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-app.get("/api/orders", async (req, res) => {
+app.get("/api/orders", verifyAdminToken, async (req, res) => {
   try {
     const orders = await Order.find().sort({ createdAt: -1 });
 
