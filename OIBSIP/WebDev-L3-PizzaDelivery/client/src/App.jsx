@@ -1,5 +1,4 @@
-
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import axios from "axios";
 import "./App.css";
 
@@ -50,6 +49,12 @@ const [adminLoading, setAdminLoading] = useState(false);
   const [orders, setOrders] = useState([]);
 const [loadingOrders, setLoadingOrders] = useState(false);
 
+const [inventory, setInventory] = useState([]);
+const [lowStockItems, setLowStockItems] = useState([]);
+const [loadingInventory, setLoadingInventory] = useState(false);
+const [inventoryMessage, setInventoryMessage] = useState("");
+
+
 const fetchOrders = async () => {
   setLoadingOrders(true);
 
@@ -71,6 +76,46 @@ const fetchOrders = async () => {
   }
 };
 
+
+const fetchInventory = async () => {
+  if (!adminToken) {
+    setInventoryMessage("Please log in as admin to view inventory.");
+    return;
+  }
+
+  setLoadingInventory(true);
+  setInventoryMessage("");
+
+  try {
+    const response = await axios.get(
+      "http://localhost:5001/api/inventory",
+      {
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+        },
+      }
+    );
+
+    setInventory(response.data.inventory || []);
+    setLowStockItems(response.data.lowStockItems || []);
+  } catch (error) {
+    setInventoryMessage(
+      error.response?.data?.message ||
+        "Could not load inventory. Please try again."
+    );
+  } finally {
+    setLoadingInventory(false);
+  }
+};
+
+useEffect(() => {
+  if (adminToken) {
+    fetchInventory();
+  } else {
+    setInventory([]);
+    setLowStockItems([]);
+  }
+}, [adminToken]);
 
 const updateOrderStatus = async (orderId, status) => {
   try {
@@ -403,6 +448,87 @@ const handleAdminLogin = async (event) => {
             </>
           )}
         </section>
+
+
+{adminToken && (
+  <section className="cart-section admin-inventory">
+    <div className="section-heading">
+      <div>
+        <p className="eyebrow">STOCK CONTROL</p>
+        <h2>Admin Inventory 📦</h2>
+      </div>
+
+      <button
+        className="outline-button"
+        onClick={fetchInventory}
+        disabled={loadingInventory}
+      >
+        {loadingInventory ? "Loading..." : "Refresh Inventory"}
+      </button>
+    </div>
+
+    {inventoryMessage && (
+      <p className="status-message">{inventoryMessage}</p>
+    )}
+
+    <div className="inventory-summary">
+      <article className="inventory-stat">
+        <span>Total products</span>
+        <strong>{inventory.length}</strong>
+      </article>
+
+      <article className="inventory-stat low-stock-stat">
+        <span>Low-stock products</span>
+        <strong>{lowStockItems.length}</strong>
+      </article>
+    </div>
+
+    {loadingInventory ? (
+      <p>Loading inventory...</p>
+    ) : inventory.length === 0 ? (
+      <p>No inventory items found. Add stock through the inventory API first.</p>
+    ) : (
+      <div className="inventory-table-wrapper">
+        <table className="inventory-table">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Stock</th>
+              <th>Threshold</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {inventory.map((item) => {
+              const isLowStock = item.stock <= item.lowStockThreshold;
+
+              return (
+                <tr key={item._id}>
+                  <td>{item.name}</td>
+                  <td>{item.stock}</td>
+                  <td>{item.lowStockThreshold}</td>
+                  <td>
+                    <span
+                      className={
+                        isLowStock
+                          ? "inventory-badge inventory-badge-low"
+                          : "inventory-badge inventory-badge-ok"
+                      }
+                    >
+                      {isLowStock ? "Low stock" : "In stock"}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    )}
+  </section>
+)}
+
 
 <section className="cart-section order-history">
   <div className="section-heading">
