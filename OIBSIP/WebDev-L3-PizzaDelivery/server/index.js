@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const Order = require("./Order");
+const Inventory = require("./Inventory");
 require("dotenv").config();
 
 const Admin = require("./Admin");
@@ -43,6 +44,10 @@ function verifyAdminToken(req, res, next) {
 
 
 const app = express();
+app.use((req, res, next) => {
+  console.log("INCOMING REQUEST:", req.method, req.originalUrl);
+  next();
+});
 const PORT = process.env.PORT || 5001;
 
 app.use(cors());
@@ -221,6 +226,94 @@ app.post("/api/orders", async (req, res) => {
     });
   }
 });
+
+// Get inventory and identify low-stock items (admin only)
+app.get("/api/inventory", verifyAdminToken, async (req, res) => {
+  try {
+    const items = await Inventory.find().sort({ name: 1 });
+
+    const lowStockItems = items.filter(
+      (item) => item.stock <= item.lowStockThreshold
+    );
+
+    res.json({
+      success: true,
+      inventory: items,
+      lowStockItems,
+    });
+  } catch (error) {
+    console.error("Fetch inventory error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Could not fetch inventory.",
+    });
+  }
+});
+
+// Create or update inventory stock (admin only)
+app.put("/api/inventory/:name", verifyAdminToken, async (req, res) => {
+  try {
+    const name = req.params.name.trim();
+    const { stock, lowStockThreshold = 10 } = req.body;
+
+    if (
+      !name ||
+      typeof stock !== "number" ||
+      !Number.isInteger(stock) ||
+      stock < 0 ||
+      typeof lowStockThreshold !== "number" ||
+      !Number.isInteger(lowStockThreshold) ||
+      lowStockThreshold < 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Name, non-negative integer stock, and valid threshold are required.",
+      });
+    }
+
+    const item = await Inventory.findOneAndUpdate(
+      { name },
+      {
+        $set: {
+          stock,
+          lowStockThreshold,
+          updatedAt: new Date(),
+        },
+        $setOnInsert: { name },
+      },
+      {
+        new: true,
+        upsert: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+      }
+    );
+
+    res.json({
+      success: true,
+      message: "Inventory saved successfully.",
+      item,
+      lowStock: item.stock <= item.lowStockThreshold,
+    });
+  } catch (error) {
+    console.error("Update inventory error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Could not update inventory.",
+    });
+  }
+});
+ 
+console.log(
+  "REGISTERED ROUTES:",
+  app.router.stack
+    .filter((layer) => layer.route)
+    .map((layer) => ({
+      path: layer.route.path,
+      methods: Object.keys(layer.route.methods),
+    }))
+);
+
 
 async function startServer() {
   try {
