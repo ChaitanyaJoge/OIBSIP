@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
 const Order = require("./Order");
 const Inventory = require("./Inventory");
 require("dotenv").config();
@@ -9,6 +11,115 @@ const Admin = require("./Admin");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const Customer = require("./Customer");
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+
+const MENU_PRICES = {
+  Margherita: 199,
+  Farmhouse: 279,
+  "Paneer Delight": 299,
+  "Spicy Veg": 249,
+};
+
+const BASE_PRICES = {
+  "Classic Hand Tossed": 0,
+  "Thin Crust": 30,
+  "Whole Wheat": 40,
+  "Cheese Burst": 60,
+  "Pan Crust": 25,
+};
+
+const SAUCE_PRICES = {
+  "Classic Tomato": 0,
+  "Spicy Red": 10,
+  Pesto: 20,
+  "Garlic White Sauce": 20,
+  "BBQ Sauce": 15,
+};
+
+const TOPPING_PRICES = {
+  Onion: 20,
+  Capsicum: 20,
+  "Sweet Corn": 25,
+  Paneer: 40,
+  Olives: 30,
+  Jalapenos: 25,
+};
+
+function calculateTrustedCart(items) {
+  if (!Array.isArray(items) || items.length === 0 || items.length > 20) {
+    throw new Error("Your cart must contain between 1 and 20 pizzas.");
+  }
+
+  let total = 0;
+  const validatedItems = [];
+
+  for (const item of items) {
+    if (!item || typeof item.name !== "string") {
+      throw new Error("Invalid pizza in your cart.");
+    }
+
+    if (item.name === "Custom Pizza") {
+      const options = item.customOptions;
+
+      if (
+        !options ||
+        !Object.hasOwn(BASE_PRICES, options.base) ||
+        !Object.hasOwn(SAUCE_PRICES, options.sauce) ||
+        typeof options.addCheese !== "boolean" ||
+        !Array.isArray(options.toppings) ||
+        options.toppings.length > Object.keys(TOPPING_PRICES).length ||
+        !options.toppings.every((name) =>
+          Object.hasOwn(TOPPING_PRICES, name)
+        ) ||
+        new Set(options.toppings).size !== options.toppings.length
+      ) {
+        throw new Error("Invalid custom pizza options.");
+      }
+
+      const price =
+        199 +
+        BASE_PRICES[options.base] +
+        SAUCE_PRICES[options.sauce] +
+        (options.addCheese ? 40 : 0) +
+        options.toppings.reduce(
+          (sum, name) => sum + TOPPING_PRICES[name],
+          0
+        );
+
+      total += price;
+      validatedItems.push({
+        name: "Custom Pizza",
+        description: `${options.base}, ${options.sauce}, ${
+          options.toppings.length ? options.toppings.join(", ") : "No extra toppings"
+        }${options.addCheese ? ", Extra cheese" : ""}`,
+        customOptions: options,
+        price,
+        emoji: "🍕",
+      });
+
+      continue;
+    }
+
+    if (!Object.hasOwn(MENU_PRICES, item.name)) {
+      throw new Error("An unknown pizza was found in your cart.");
+    }
+
+    const price = MENU_PRICES[item.name];
+    total += price;
+    validatedItems.push({
+      name: item.name,
+      price,
+      emoji: "🍕",
+    });
+  }
+
+  return { total, validatedItems };
+}
+
 
 function verifyAdminToken(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -360,83 +471,201 @@ app.patch("/api/orders/:id/status", verifyAdminToken, async (req, res) => {
 });
 
 
-app.post("/api/orders", (req, res, next) => {
-  const authHeader = req.headers.authorization;
 
-  if (!authHeader) {
-    return next();
-  }
-
-  return verifyCustomerToken(req, res, next);
-}, async (req, res) => {
+// Create a pending order and a Razorpay test/live-mode order.
+app.post("/api/payments/create-order", verifyCustomerToken, async (req, res) => {
   try {
-    const { items, total } = req.body;
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+      return res.status(503).json({
+        success: false,
+        message: "Razorpay is not configured on the server.",
+      });
+    }
 
-    if (!Array.isArray(items) || items.length === 0) {
+    const { total, validatedItems } = calculateTrustedCart(req.body.items);
+
+    // Check current stock before creating the payment.
+    const quantities = {};
+    for (const item of validatedItems) {
+      if (item.name !== "Custom Pizza") {
+        quantities[item.name] = (quantities[item.name] || 0) + 1;
+      }
+    }
+
+    for (const [name, quantity] of Object.entries(quantities)) {
+      const stockItem = await Inventory.findOne({ name });
+      if (stockItem && stockItem.stock < quantity) {
+        return res.status(409).json({
+          success: false,
+          message: `Insufficient stock for ${name}. Available: ${stockItem.stock}.`,
+        });
+      }
+    }
+
+    const receipt = `pz_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    const razorpayOrder = await razorpay.orders.create({
+      amount: total * 100,
+      currency: "INR",
+      receipt,
+    });
+
+    const order = await Order.create({
+      orderId: `PZ-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      customerId: req.customer.id,
+      items: validatedItems,
+      total,
+      status: "Order Received",
+      paymentStatus: "Pending",
+      razorpayOrderId: razorpayOrder.id,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Payment order created.",
+      keyId: process.env.RAZORPAY_KEY_ID,
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      orderId: order.orderId,
+    });
+  } catch (error) {
+    console.error("Create payment order error:", error.message);
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Could not create payment order.",
+    });
+  }
+});
+
+
+// Verify Razorpay signature and deduct stock only once.
+app.post("/api/payments/verify", verifyCustomerToken, async (req, res) => {
+  let order;
+  let deducted = [];
+
+  try {
+    const {
+      razorpay_order_id: razorpayOrderId,
+      razorpay_payment_id: razorpayPaymentId,
+      razorpay_signature: razorpaySignature,
+    } = req.body;
+
+    if (
+      typeof razorpayOrderId !== "string" ||
+      typeof razorpayPaymentId !== "string" ||
+      typeof razorpaySignature !== "string"
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Your order must contain at least one pizza.",
+        message: "Payment verification details are incomplete.",
+      });
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpayOrderId}|${razorpayPaymentId}`)
+      .digest("hex");
+
+    const expectedBuffer = Buffer.from(expectedSignature, "hex");
+    const receivedBuffer = Buffer.from(razorpaySignature, "hex");
+
+    if (
+      expectedBuffer.length !== receivedBuffer.length ||
+      !crypto.timingSafeEqual(expectedBuffer, receivedBuffer)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment signature verification failed.",
+      });
+    }
+
+    // Confirm payment status and amount directly with Razorpay.
+    const payment = await razorpay.payments.fetch(razorpayPaymentId);
+
+    const savedOrder = await Order.findOne({
+      razorpayOrderId,
+      customerId: req.customer.id,
+    });
+
+    if (!savedOrder) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found for this customer.",
       });
     }
 
     if (
-      typeof total !== "number" ||
-      !Number.isFinite(total) ||
-      total < 0
+      payment.order_id !== razorpayOrderId ||
+      payment.amount !== Math.round(savedOrder.total * 100) ||
+      payment.currency !== "INR" ||
+      payment.status !== "captured" ||
+      payment.captured !== true
     ) {
       return res.status(400).json({
         success: false,
-        message: "A valid order total is required.",
+        message: "Payment is not captured or does not match the order amount.",
       });
     }
 
-    // Count how many units of each stocked pizza are ordered.
-    const quantities = {};
+    // Claim a pending order atomically. Duplicate verification cannot claim it again.
+    order = await Order.findOneAndUpdate(
+      {
+        razorpayOrderId,
+        customerId: req.customer.id,
+        paymentStatus: "Pending",
+      },
+      {
+        $set: {
+          paymentStatus: "Processing",
+          razorpayPaymentId,
+        },
+      },
+      { new: true }
+    );
 
-    for (const item of items) {
+    if (!order) {
+      const existing = await Order.findOne({
+        razorpayOrderId,
+        customerId: req.customer.id,
+      });
+
       if (
-        !item ||
-        typeof item.name !== "string" ||
-        !item.name.trim()
+        existing?.paymentStatus === "Paid" &&
+        existing.razorpayPaymentId === razorpayPaymentId
       ) {
-        return res.status(400).json({
-          success: false,
-          message: "Each order item must have a valid name.",
+        return res.json({
+          success: true,
+          message: "Payment already verified.",
+          order: existing,
         });
       }
 
-      if (item.name.trim() !== "Custom Pizza") {
-        const name = item.name.trim();
-        quantities[name] = (quantities[name] || 0) + 1;
-      }
-    }
-
-    // Check inventory before accepting the order.
-    const stockUpdates = [];
-
-    for (const [name, quantity] of Object.entries(quantities)) {
-      const inventoryItem = await Inventory.findOne({ name });
-
-      // Untracked pizzas are not deducted from inventory.
-      if (!inventoryItem) {
-        continue;
-      }
-
-      if (inventoryItem.stock < quantity) {
-        return res.status(409).json({
-          success: false,
-          message: `Insufficient stock for ${name}. Available: ${inventoryItem.stock}.`,
-        });
-      }
-
-      stockUpdates.push({
-        name,
-        quantity,
+      return res.status(409).json({
+        success: false,
+        message: "Order is already being processed or cannot be verified.",
       });
     }
 
-    // Deduct stock conditionally to avoid reducing it below zero.
-    const deducted = [];
+    const quantities = {};
+    for (const item of order.items) {
+      if (item.name !== "Custom Pizza") {
+        quantities[item.name] = (quantities[item.name] || 0) + 1;
+      }
+    }
+
+    const stockUpdates = [];
+    for (const [name, quantity] of Object.entries(quantities)) {
+      const stockItem = await Inventory.findOne({ name });
+
+      // Items not tracked in inventory are intentionally skipped.
+      if (!stockItem) continue;
+
+      if (stockItem.stock < quantity) {
+        throw new Error(`Insufficient stock for ${name} after payment. Manual refund may be required.`);
+      }
+
+      stockUpdates.push({ name, quantity });
+    }
 
     for (const update of stockUpdates) {
       const result = await Inventory.updateOne(
@@ -447,61 +676,124 @@ app.post("/api/orders", (req, res, next) => {
         {
           $inc: { stock: -update.quantity },
           $set: { updatedAt: new Date() },
-      }
+        }
       );
 
       if (result.modifiedCount !== 1) {
-        // Restore stock already deducted for this order attempt.
-        for (const previous of deducted) {
-          await Inventory.updateOne(
-            { name: previous.name },
-            { $inc: { stock: previous.quantity } }
-          );
-        }
-
-        return res.status(409).json({
-          success: false,
-          message: `Stock changed while placing your order. Please try again.`,
-        });
+        throw new Error(`Stock changed for ${update.name}. Manual refund may be required.`);
       }
 
       deducted.push(update);
     }
 
-    const order = new Order({
-  orderId: `PZ-${Date.now()}`,
-  customerId: req.customer?.id || null,
-  items,
-  total,
-  status: "Order Received",
-});
+    order.paymentStatus = "Paid";
+    await order.save();
 
-    try {
-      await order.save();
-    } catch (error) {
-      // Restore stock if saving the order fails.
-      for (const previous of deducted) {
-        await Inventory.updateOne(
-          { name: previous.name },
-          { $inc: { stock: previous.quantity } }
-        );
-      }
-
-      throw error;
-    }
-
-    return res.status(201).json({
+    return res.json({
       success: true,
-      message: "Order saved successfully!",
+      message: "Payment verified and order confirmed.",
       order,
     });
   } catch (error) {
-    console.error("Order save error:", error.message);
-    return res.status(500).json({
+    // Restore stock if order confirmation failed.
+    for (const previous of deducted) {
+      try {
+        await Inventory.updateOne(
+          { name: previous.name },
+          {
+            $inc: { stock: previous.quantity },
+            $set: { updatedAt: new Date() },
+          }
+        );
+      } catch (rollbackError) {
+        console.error("Inventory rollback error:", rollbackError.message);
+      }
+    }
+
+    let responseStatus = 400;
+    let responseMessage = error.message || "Could not verify payment.";
+
+    if (order && order.paymentStatus === "Paid") {
+      // The database save may have failed after stock was deducted.
+      // Do not automatically refund or reset an order in this uncertain state.
+      responseStatus = 500;
+      responseMessage =
+        "Order confirmation needs manual review. Do not retry payment; contact support.";
+    } else if (order && req.body.razorpay_payment_id) {
+      try {
+        const payment = await razorpay.payments.fetch(
+          req.body.razorpay_payment_id
+        );
+
+        if (
+          payment.order_id === order.razorpayOrderId &&
+          payment.amount === Math.round(order.total * 100) &&
+          payment.currency === "INR" &&
+          payment.status === "captured" &&
+          payment.captured === true
+        ) {
+          // Attempt a full refund if a captured payment cannot be fulfilled.
+          await razorpay.payments.refund(payment.id, {
+            amount: payment.amount,
+            notes: {
+              reason: "Order confirmation failed; manual review may be needed",
+              internal_order_id: order.orderId,
+            },
+          });
+
+          order.paymentStatus = "Failed";
+          order.status = "Refund Requested";
+          await order.save();
+
+          responseStatus = 409;
+          responseMessage =
+            "Payment was captured but the order could not be confirmed. A refund has been requested; check payment status before retrying.";
+        } else if (payment.status === "failed") {
+          order.paymentStatus = "Failed";
+          order.set("razorpayPaymentId", undefined);
+          await order.save();
+
+          responseStatus = 400;
+          responseMessage = "Payment failed. You may try again.";
+        } else {
+          // Keep the order in Processing for manual reconciliation.
+          responseStatus = 500;
+          responseMessage =
+            "Payment status is uncertain. Do not retry payment; contact support.";
+          await order.save();
+        }
+      } catch (refundError) {
+        console.error(
+          "Payment/refund reconciliation error:",
+          refundError.message
+        );
+
+        // Never mark a potentially captured payment as Pending.
+        responseStatus = 500;
+        responseMessage =
+          "Payment or refund needs manual review. Do not retry payment; contact support.";
+
+        await order.save().catch(() => {});
+      }
+    } else if (order) {
+      order.paymentStatus = "Pending";
+      order.set("razorpayPaymentId", undefined);
+      await order.save().catch(() => {});
+    }
+
+    console.error("Payment verification error:", error.message);
+    return res.status(responseStatus).json({
       success: false,
-      message: "Could not save your order. Please try again.",
+      message: responseMessage,
     });
   }
+});
+
+app.post("/api/orders", (req, res) => {
+  return res.status(403).json({
+    success: false,
+    message: "Direct orders are disabled. Please use Razorpay checkout.",
+  });
 });
 
 

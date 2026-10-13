@@ -199,16 +199,23 @@ const addCustomPizzaToCart = () => {
     id: Date.now(),
     name: "Custom Pizza",
     description: `${selectedBase}, ${selectedSauce}, ${
-      selectedToppings.length ? selectedToppings.join(", ") : "No extra toppings"
+      selectedToppings.length
+        ? selectedToppings.join(", ")
+        : "No extra toppings"
     }${addCheese ? ", Extra cheese" : ""}`,
     price: customPizzaPrice,
     emoji: "🍕",
+    customOptions: {
+      base: selectedBase,
+      sauce: selectedSauce,
+      addCheese,
+      toppings: [...selectedToppings],
+    },
   };
 
   setCart((current) => [...current, customPizza]);
   setMessage("Custom pizza added to your cart!");
 };
-
 
 const handleAdminLogin = async (event) => {
   event.preventDefault();
@@ -310,43 +317,115 @@ const handleCustomerLogout = () => {
     }
   };
 
-  const placeOrder = async () => {
-    if (cart.length === 0) {
-      setMessage("Please add a pizza before placing your order.");
-      return;
-    }
 
-    try {
-      const response = await axios.post(
-  "http://localhost:5001/api/orders",
-  {
-    items: cart,
-    total,
-  },
-  customerToken
-    ? {
+const placeOrder = async () => {
+  if (cart.length === 0) {
+    setMessage("Please add a pizza before placing your order.");
+    return;
+  }
+
+  if (!customerToken) {
+    setMessage("Please log in as a customer before placing your order.");
+    setShowCustomerAuth(true);
+    return;
+  }
+
+  if (!window.Razorpay) {
+    setMessage("Razorpay Checkout did not load. Please refresh the page.");
+    return;
+  }
+
+  try {
+    setMessage("Preparing secure payment...");
+
+    const response = await axios.post(
+      "http://localhost:5001/api/payments/create-order",
+      { items: cart },
+      {
         headers: {
           Authorization: `Bearer ${customerToken}`,
         },
       }
-    : {}
-);
+    );
 
+    const paymentOrder = response.data;
+
+    const options = {
+      key: paymentOrder.keyId,
+      amount: paymentOrder.amount,
+      currency: paymentOrder.currency,
+      name: "PizzaCraft",
+      description: "Pizza Delivery Order",
+      order_id: paymentOrder.razorpayOrderId,
+
+      handler: async function (paymentResponse) {
+        try {
+          setMessage("Verifying payment...");
+
+          const verification = await axios.post(
+            "http://localhost:5001/api/payments/verify",
+            paymentResponse,
+            {
+              headers: {
+                Authorization: `Bearer ${customerToken}`,
+              },
+            }
+          );
+
+          setMessage(
+            `Payment successful! Order ID: ${
+              verification.data.order?.orderId || paymentOrder.orderId
+            }`
+          );
+
+          setCart([]);
+
+          if (typeof fetchOrders === "function") {
+            await fetchOrders();
+          }
+
+          if (adminToken) {
+            await fetchInventory();
+          }
+        } catch (error) {
+          setMessage(
+            error.response?.data?.message ||
+              "Payment verification failed. Please contact support before trying to pay again."
+          );
+        }
+      },
+
+      modal: {
+        ondismiss: function () {
+          setMessage(
+            "Payment window closed. Check your order status before trying again."
+          );
+        },
+      },
+
+      theme: {
+        color: "#e85d04",
+      },
+    };
+
+    const checkout = new window.Razorpay(options);
+
+    checkout.on("payment.failed", function (paymentError) {
       setMessage(
-        `${response.data.message} Order ID: ${response.data.order.orderId}`
+        paymentError.error?.description ||
+          "Payment failed. Please try again."
       );
-      setCart([]);
+    });
 
-      if (adminToken) {
-        await fetchInventory();
-      }
+    checkout.open();
+  } catch (error) {
+    setMessage(
+      error.response?.data?.message ||
+        "Could not start payment. Please try again."
+    );
+  }
+};
 
-    } catch (error) {
-      setMessage(
-        error.response?.data?.message || "Could not place your order."
-      );
-    }
-  };
 
   return (
     <div className="app">
