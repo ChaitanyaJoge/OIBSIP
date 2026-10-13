@@ -8,7 +8,7 @@ require("dotenv").config();
 const Admin = require("./Admin");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-
+const Customer = require("./Customer");
 
 function verifyAdminToken(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -38,6 +38,39 @@ function verifyAdminToken(req, res, next) {
     return res.status(401).json({
       success: false,
       message: "Invalid or expired token.",
+    });
+  }
+}
+
+
+function verifyCustomerToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      success: false,
+      message: "Please log in to access your orders.",
+    });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (decoded.role !== "customer" || !decoded.id) {
+      return res.status(403).json({
+        success: false,
+        message: "Customer access required.",
+      });
+    }
+
+    req.customer = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid or expired customer token.",
     });
   }
 }
@@ -113,6 +146,129 @@ app.post("/api/admin/login", async (req, res) => {
 });
 
 
+app.post("/api/customers/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    if (
+      typeof name !== "string" ||
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      !name.trim() ||
+      !email.trim() ||
+      password.length < 8
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Name, valid email, and password of at least 8 characters are required.",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const existingCustomer = await Customer.findOne({
+      email: normalizedEmail,
+    });
+
+    if (existingCustomer) {
+      return res.status(409).json({
+        success: false,
+        message: "An account with this email already exists.",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    const customer = await Customer.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      password: hashedPassword,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Customer registered successfully.",
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+      },
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "An account with this email already exists.",
+      });
+    }
+
+    console.error("Customer registration error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Customer registration failed.",
+    });
+  }
+});
+
+app.post("/api/customers/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      !email.trim() ||
+      !password
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and password are required.",
+      });
+    }
+
+    const customer = await Customer.findOne({
+      email: email.trim().toLowerCase(),
+    }).select("+password");
+
+    if (
+      !customer ||
+      !(await bcrypt.compare(password, customer.password))
+    ) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password.",
+      });
+    }
+
+    const token = jwt.sign(
+      {
+        id: customer._id.toString(),
+        role: "customer",
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "2h" }
+    );
+
+    res.json({
+      success: true,
+      message: "Customer login successful.",
+      token,
+      customer: {
+        id: customer._id,
+        name: customer.name,
+        email: customer.email,
+      },
+    });
+  } catch (error) {
+    console.error("Customer login error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Customer login failed.",
+    });
+  }
+});
+
+
 app.get("/api/health", (req, res) => {
   res.json({
     success: true,
@@ -136,6 +292,27 @@ app.get("/api/orders", verifyAdminToken, async (req, res) => {
     });
   }
 });
+
+
+app.get("/api/customers/orders", verifyCustomerToken, async (req, res) => {
+  try {
+    const orders = await Order.find({
+      customerId: req.customer.id,
+    }).sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      orders,
+    });
+  } catch (error) {
+    console.error("Customer order history error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Could not fetch your orders.",
+    });
+  }
+});
+
 
 app.patch("/api/orders/:id/status", verifyAdminToken, async (req, res) => {
   try {
@@ -183,7 +360,15 @@ app.patch("/api/orders/:id/status", verifyAdminToken, async (req, res) => {
 });
 
 
-app.post("/api/orders", async (req, res) => {
+app.post("/api/orders", (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return next();
+  }
+
+  return verifyCustomerToken(req, res, next);
+}, async (req, res) => {
   try {
     const { items, total } = req.body;
 
@@ -284,11 +469,12 @@ app.post("/api/orders", async (req, res) => {
     }
 
     const order = new Order({
-      orderId: `PZ-${Date.now()}`,
-      items,
-      total,
-      status: "Order Received",
-    });
+  orderId: `PZ-${Date.now()}`,
+  customerId: req.customer?.id || null,
+  items,
+  total,
+  status: "Order Received",
+});
 
     try {
       await order.save();

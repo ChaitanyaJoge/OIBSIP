@@ -430,3 +430,37 @@ button:disabled {
     font-size: 13px;
   }
 }
+/* Customer authentication */
+.customer-auth form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 440px;
+}
+
+.customer-auth label {
+  font-weight: 600;
+}
+
+.customer-auth input {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #e2d5c8;
+  border-radius: 8px;
+  font: inherit;
+}
+
+.text-button {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #d83a27;
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.customer-welcome {
+  font-size: 14px;
+  font-weight: 600;
+}

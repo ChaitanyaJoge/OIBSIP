@@ -37,6 +37,15 @@ const pizzaToppings = [
 function App() {
   const [cart, setCart] = useState([]);
   const [message, setMessage] = useState("");
+  const [showCustomerAuth, setShowCustomerAuth] = useState(false);
+  const [customerMode, setCustomerMode] = useState("login");
+  const [customerName, setCustomerName] = useState("");
+  const [customerEmail, setCustomerEmail] = useState("");
+  const [customerPassword, setCustomerPassword] = useState("");
+  const [customerToken, setCustomerToken] = useState("");
+  const [customer, setCustomer] = useState(null);
+  const [customerAuthMessage, setCustomerAuthMessage] = useState("");
+  const [customerAuthLoading, setCustomerAuthLoading] = useState(false);
 
 const [showAdminLogin, setShowAdminLogin] = useState(false);
 const [adminEmail, setAdminEmail] = useState("");
@@ -55,26 +64,42 @@ const [loadingInventory, setLoadingInventory] = useState(false);
 const [inventoryMessage, setInventoryMessage] = useState("");
 
 
+
 const fetchOrders = async () => {
+  const isAdmin = Boolean(adminToken);
+  const isCustomer = Boolean(customerToken);
+
+  if (!isAdmin && !isCustomer) {
+    setMessage("Please log in as a customer to view your orders.");
+    return;
+  }
+
   setLoadingOrders(true);
 
   try {
     const response = await axios.get(
-  "http://localhost:5001/api/orders",
-  {
-    headers: {
-      Authorization: `Bearer ${adminToken}`,
-    },
-  }
-);
-    setOrders(response.data.orders);
+      isAdmin
+        ? "http://localhost:5001/api/orders"
+        : "http://localhost:5001/api/customers/orders",
+      {
+        headers: {
+          Authorization: `Bearer ${isAdmin ? adminToken : customerToken}`,
+        },
+      }
+    );
+
+    setOrders(response.data.orders || []);
     setMessage("");
   } catch (error) {
-    setMessage("Could not load order history. Please try again.");
+    setMessage(
+      error.response?.data?.message ||
+        "Could not load order history. Please try again."
+    );
   } finally {
     setLoadingOrders(false);
   }
 };
+
 
 
 const fetchInventory = async () => {
@@ -213,6 +238,69 @@ const handleAdminLogin = async (event) => {
   }
 };
 
+
+const handleCustomerAuth = async (event) => {
+  event.preventDefault();
+  setCustomerAuthLoading(true);
+  setCustomerAuthMessage("");
+
+  try {
+    const endpoint =
+      customerMode === "register"
+        ? "/api/customers/register"
+        : "/api/customers/login";
+
+    const payload =
+      customerMode === "register"
+        ? {
+            name: customerName,
+            email: customerEmail,
+            password: customerPassword,
+          }
+        : {
+            email: customerEmail,
+            password: customerPassword,
+          };
+
+    const response = await axios.post(
+      `http://localhost:5001${endpoint}`,
+      payload
+    );
+
+    if (customerMode === "login") {
+      setCustomerToken(response.data.token);
+      setCustomer(response.data.customer);
+      setCustomerPassword("");
+      setShowCustomerAuth(false);
+      setCustomerAuthMessage("");
+      setMessage(`Welcome, ${response.data.customer.name}!`);
+    } else {
+      setCustomerPassword("");
+      setCustomerMode("login");
+      setCustomerAuthMessage(
+        "Account created successfully! Please log in."
+      );
+    }
+  } catch (error) {
+    setCustomerAuthMessage(
+      error.response?.data?.message ||
+        "Authentication failed. Please try again."
+    );
+  } finally {
+    setCustomerAuthLoading(false);
+  }
+};
+
+const handleCustomerLogout = () => {
+  setCustomerToken("");
+  setCustomer(null);
+  setCustomerPassword("");
+  setCustomerEmail("");
+  setCustomerName("");
+  setMessage("You have been logged out.");
+};
+
+
   const testBackend = async () => {
     try {
       const response = await axios.get("http://localhost:5001/api/health");
@@ -230,13 +318,19 @@ const handleAdminLogin = async (event) => {
 
     try {
       const response = await axios.post(
-        "http://localhost:5001/api/orders",
-        {
-          items: cart,
-          total,
-        }
-      );
-
+  "http://localhost:5001/api/orders",
+  {
+    items: cart,
+    total,
+  },
+  customerToken
+    ? {
+        headers: {
+          Authorization: `Bearer ${customerToken}`,
+        },
+      }
+    : {}
+);
 
       setMessage(
         `${response.data.message} Order ID: ${response.data.order.orderId}`
@@ -254,7 +348,6 @@ const handleAdminLogin = async (event) => {
     }
   };
 
-
   return (
     <div className="app">
 
@@ -262,6 +355,32 @@ const handleAdminLogin = async (event) => {
   <a className="brand" href="/">🍕 PizzaCraft</a>
 
   <div className="navbar-actions">
+
+{customerToken ? (
+  <>
+    <span className="customer-welcome">
+      Hi, {customer?.name}
+    </span>
+    <button
+      className="outline-button"
+      onClick={handleCustomerLogout}
+    >
+      Logout
+    </button>
+  </>
+) : (
+  <button
+    className="outline-button"
+    onClick={() => {
+      setCustomerMode("login");
+      setCustomerAuthMessage("");
+      setShowCustomerAuth((current) => !current);
+    }}
+  >
+    Customer Login
+  </button>
+)}
+
     <button className="outline-button" onClick={testBackend}>
       Test API
     </button>
@@ -285,6 +404,104 @@ const handleAdminLogin = async (event) => {
         </section>
 
         {message && <p className="status-message">{message}</p>}
+
+{showCustomerAuth && !customerToken && (
+  <section className="cart-section customer-auth">
+    <p className="eyebrow">WELCOME TO PIZZACRAFT</p>
+    <h2>
+      {customerMode === "register"
+        ? "Create Your Account"
+        : "Customer Login"}
+    </h2>
+
+    <p>
+      {customerMode === "register"
+        ? "Register to get started with your pizza orders."
+        : "Sign in to your account."}
+    </p>
+
+    <form onSubmit={handleCustomerAuth}>
+      {customerMode === "register" && (
+        <>
+          <label htmlFor="customer-name">Full name</label>
+          <input
+            id="customer-name"
+            type="text"
+            value={customerName}
+            onChange={(event) => setCustomerName(event.target.value)}
+            placeholder="Enter your name"
+            maxLength={80}
+            required
+          />
+        </>
+      )}
+
+      <label htmlFor="customer-email">Email address</label>
+      <input
+        id="customer-email"
+        type="email"
+        value={customerEmail}
+        onChange={(event) => setCustomerEmail(event.target.value)}
+        placeholder="Enter your email"
+        required
+      />
+
+      <label htmlFor="customer-password">Password</label>
+      <input
+        id="customer-password"
+        type="password"
+        value={customerPassword}
+        onChange={(event) => setCustomerPassword(event.target.value)}
+        placeholder="At least 8 characters"
+        minLength={8}
+        autoComplete={
+          customerMode === "register"
+            ? "new-password"
+            : "current-password"
+        }
+        required
+      />
+
+      {customerAuthMessage && (
+        <p className="status-message" role="status">
+          {customerAuthMessage}
+        </p>
+      )}
+
+      <button
+        className="primary-button"
+        type="submit"
+        disabled={customerAuthLoading}
+      >
+        {customerAuthLoading
+          ? "Please wait..."
+          : customerMode === "register"
+            ? "Create Account"
+            : "Sign In"}
+      </button>
+    </form>
+
+    <p>
+      {customerMode === "register"
+        ? "Already registered?"
+        : "New to PizzaCraft?"}{" "}
+      <button
+        type="button"
+        className="text-button"
+        onClick={() => {
+          setCustomerMode(
+            customerMode === "register" ? "login" : "register"
+          );
+          setCustomerAuthMessage("");
+          setCustomerPassword("");
+        }}
+      >
+        {customerMode === "register" ? "Sign in" : "Create an account"}
+      </button>
+    </p>
+  </section>
+)}
+
 
 {showAdminLogin && (
   <section className="cart-section admin-login">
@@ -537,46 +754,65 @@ const handleAdminLogin = async (event) => {
   <div className="section-heading">
     <div>
       <p className="eyebrow">YOUR ACTIVITY</p>
-      <h2>Order History</h2>
+      <h2>{adminToken ? "All Customer Orders" : "My Order History"}</h2>
     </div>
 
-    <button
-      className="outline-button"
-      onClick={fetchOrders}
-      disabled={loadingOrders}
-    >
-      {loadingOrders ? "Loading..." : "View Orders"}
-    </button>
+    {(adminToken || customerToken) && (
+      <button
+        className="outline-button"
+        onClick={fetchOrders}
+        disabled={loadingOrders}
+      >
+        {loadingOrders ? "Loading..." : "Refresh Orders"}
+      </button>
+    )}
   </div>
 
-  {orders.length === 0 ? (
-    <p>No orders loaded yet. Click "View Orders" to see your saved orders.</p>
+  {!adminToken && !customerToken ? (
+    <div>
+      <p>Please log in to view your personal order history and track deliveries.</p>
+      <button
+        className="primary-button"
+        onClick={() => {
+          setCustomerMode("login");
+          setCustomerAuthMessage("");
+          setShowCustomerAuth(true);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }}
+      >
+        Customer Login
+      </button>
+    </div>
+  ) : loadingOrders ? (
+    <p>Loading your orders...</p>
+  ) : orders.length === 0 ? (
+    <p>
+      No orders found. Place an order and refresh to see it here.
+    </p>
   ) : (
     <div className="history-list">
       {orders.map((order) => (
         <article className="history-card" key={order._id}>
+          <div className="history-card-header">
+            <strong>{order.orderId}</strong>
 
-
-<div className="history-card-header">
-  <strong>{order.orderId}</strong>
-
-  {adminToken ? (
-    <select
-      value={order.status}
-      onChange={(event) =>
-        updateOrderStatus(order._id, event.target.value)
-      }
-    >
-      <option value="Order Received">Order Received</option>
-      <option value="Preparing">Preparing</option>
-      <option value="Out for Delivery">Out for Delivery</option>
-      <option value="Delivered">Delivered</option>
-    </select>
-  ) : (
-    <span>{order.status}</span>
-  )}
-</div>
-
+            {adminToken ? (
+              <select
+                value={order.status}
+                onChange={(event) =>
+                  updateOrderStatus(order._id, event.target.value)
+                }
+                aria-label={`Update status for ${order.orderId}`}
+              >
+                <option value="Order Received">Order Received</option>
+                <option value="Preparing">Preparing</option>
+                <option value="Out for Delivery">Out for Delivery</option>
+                <option value="Delivered">Delivered</option>
+              </select>
+            ) : (
+              <span>{order.status}</span>
+            )}
+          </div>
 
           <p>
             {order.items.map((item) => item.name).join(", ")}
@@ -588,11 +824,26 @@ const handleAdminLogin = async (event) => {
             </span>
             <strong>₹{order.total}</strong>
           </div>
+
+          {!adminToken && (
+            <p>
+              {order.status === "Order Received"
+                ? "Your order has been received."
+                : order.status === "Preparing"
+                  ? "Your pizza is being prepared."
+                  : order.status === "Out for Delivery"
+                    ? "Your order is on its way!"
+                    : order.status === "Delivered"
+                      ? "Your order has been delivered."
+                      : `Current status: ${order.status}`}
+            </p>
+          )}
         </article>
       ))}
     </div>
   )}
 </section>
+
 
       </main>
 

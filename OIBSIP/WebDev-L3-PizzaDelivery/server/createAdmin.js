@@ -1,5 +1,4 @@
-
-require("dotenv").config();
+require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
@@ -30,10 +29,10 @@ async function createAdmin() {
     );
 
     await Admin.findOneAndUpdate(
-      { email },
-      { email, password: passwordHash },
-      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
-    );
+  { email },
+  { email, password: passwordHash },
+  { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
+);
 
     console.log(`Admin account created or updated for: ${email}`);
   } catch (error) {
